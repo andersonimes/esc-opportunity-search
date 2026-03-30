@@ -375,27 +375,46 @@ def upsert_opportunities(opportunities: list[Opportunity], dry_run: bool = False
         upserted += len(batch)
         log.info("Upserted batch %d-%d of %d", i + 1, min(i + batch_size, len(opportunities)), len(opportunities))
 
-    # Remove stale opportunities (no longer in API response)
-    api_opids = {opp.opid for opp in opportunities}
-    if api_opids:
-        opid_list = ", ".join(f"'{opid}'" for opid in api_opids)
-        # Count stale before deleting
-        count_r = ws.statement_execution.execute_statement(
-            warehouse_id=wh_id,
-            statement=f"SELECT COUNT(*) FROM {table} WHERE opid NOT IN ({opid_list})",
-            wait_timeout="50s",
-        )
-        removed = 0
-        if count_r.result and count_r.result.data_array:
-            removed = int(count_r.result.data_array[0][0])
-
-        if removed > 0:
-            _execute(f"DELETE FROM {table} WHERE opid NOT IN ({opid_list})")
-            log.info("Removed %d stale opportunities", removed)
-
-        return upserted, removed
-
     return upserted, 0
+
+
+def remove_stale_opportunities(current_opportunities: list[Opportunity], dry_run: bool = False) -> tuple[int, int]:
+    """Remove opportunities from Delta table that are no longer in the API response.
+
+    Returns (0, removed_count).
+    """
+    if dry_run:
+        return 0, 0
+
+    table = get_table_name()
+    ws = get_workspace_client()
+    wh_id = _get_warehouse_id(ws)
+
+    api_opids = {opp.opid for opp in current_opportunities}
+    if not api_opids:
+        return 0, 0
+
+    opid_list = ", ".join(f"'{opid}'" for opid in api_opids)
+    count_r = ws.statement_execution.execute_statement(
+        warehouse_id=wh_id,
+        statement=f"SELECT COUNT(*) FROM {table} WHERE opid NOT IN ({opid_list})",
+        wait_timeout="50s",
+    )
+    removed = 0
+    if count_r.result and count_r.result.data_array:
+        removed = int(count_r.result.data_array[0][0])
+
+    if removed > 0:
+        def _execute(stmt: str) -> None:
+            r = ws.statement_execution.execute_statement(
+                warehouse_id=wh_id, statement=stmt, wait_timeout="50s",
+            )
+            if r.status.error:
+                raise RuntimeError(f"SQL error: {r.status.error.message}")
+        _execute(f"DELETE FROM {table} WHERE opid NOT IN ({opid_list})")
+        log.info("Removed %d stale opportunities", removed)
+
+    return 0, removed
 
 
 # ---------------------------------------------------------------------------
@@ -451,15 +470,16 @@ def log_refresh(refresh_log: RefreshLog) -> None:
 # ---------------------------------------------------------------------------
 
 async def run_ingestion(dry_run: bool = False) -> RefreshLog:
-    """Run the incremental ingestion pipeline.
+    """Run the incremental ingestion pipeline with streaming upserts.
 
     1. Fetch all opportunities from ESC API (always full fetch — it's fast)
-    2. Load existing deadlines from Delta table (skip re-scraping known ones)
-    3. Scrape deadlines only for new/unknown opportunities
-    4. Build Opportunity models
-    5. Upsert to Delta table (MERGE — idempotent)
-    6. Remove stale opportunities no longer in API
-    7. Trigger Vector Search index sync
+    2. Immediately upsert all opportunities (with Rolling/Open deadlines for unknown)
+    3. Load existing deadlines from Delta table (skip re-scraping known ones)
+    4. Scrape deadlines incrementally, upserting every 100 scrapes
+    5. Remove stale opportunities no longer in API
+    6. Trigger Vector Search index sync
+
+    Data is queryable from step 2 onward — scraping just enriches deadlines.
     """
     refresh = RefreshLog(
         run_id=str(uuid.uuid4()),
@@ -477,33 +497,80 @@ async def run_ingestion(dry_run: bool = False) -> RefreshLog:
             refresh.pages_fetched = (len(raw_opportunities) // PAGE_SIZE) + 1
             log.info("Fetched %d opportunities total", len(raw_opportunities))
 
-            # Step 2: Load existing deadlines
+            # Step 2: Upsert all opportunities immediately (deadlines as Rolling/Open)
+            # This makes all data queryable right away
+            initial_opportunities = [
+                build_opportunity(source, None)
+                for source in raw_opportunities
+            ]
+            upserted, _ = upsert_opportunities(initial_opportunities, dry_run=dry_run)
+            refresh.opportunities_added = upserted
+            log.info("Initial upsert complete — all %d opportunities now queryable", upserted)
+
+            # Step 3: Load existing deadlines
             existing_deadlines = load_existing_deadlines(dry_run=dry_run)
             log.info("Loaded %d existing deadlines from Delta table", len(existing_deadlines))
 
-            # Step 3: Scrape deadlines (incremental)
-            deadlines = await scrape_deadlines_incremental(
-                client, raw_opportunities, existing_deadlines,
+            # Step 4: Scrape deadlines incrementally, upserting as we go
+            # Build a lookup from opid -> raw source for re-building opportunities
+            source_by_opid = {str(s.get("opid", "")): s for s in raw_opportunities}
+
+            deadlines = dict(existing_deadlines)  # Start with known deadlines
+            scrape_batch: list[Opportunity] = []
+            new_scraped = 0
+
+            to_scrape = [
+                opp for opp in raw_opportunities
+                if not opp.get("has_no_deadline", False)
+                and str(opp.get("opid", "")) not in existing_deadlines
+            ]
+            skipped_no_deadline = sum(1 for o in raw_opportunities if o.get("has_no_deadline", False))
+            skipped_known = sum(
+                1 for o in raw_opportunities
+                if not o.get("has_no_deadline", False)
+                and str(o.get("opid", "")) in existing_deadlines
             )
-            new_scraped = sum(
-                1 for opid, d in deadlines.items()
-                if d is not None and opid not in existing_deadlines
+            log.info(
+                "Deadline scraping: %d to scrape, %d skipped (no deadline), %d skipped (already known)",
+                len(to_scrape), skipped_no_deadline, skipped_known,
             )
+
+            for i, opp in enumerate(to_scrape):
+                opid = str(opp["opid"])
+                deadline = await scrape_deadline(client, opid)
+                deadlines[opid] = deadline
+
+                if deadline is not None:
+                    new_scraped += 1
+
+                # Re-build opportunity with the scraped deadline and queue for upsert
+                scrape_batch.append(build_opportunity(opp, deadline))
+
+                # Upsert every 100 scrapes
+                if len(scrape_batch) >= 100:
+                    upsert_opportunities(scrape_batch, dry_run=dry_run)
+                    log.info("Scraped and upserted %d/%d deadlines", i + 1, len(to_scrape))
+                    scrape_batch = []
+
+                await asyncio.sleep(5)
+
+            # Upsert remaining batch
+            if scrape_batch:
+                upsert_opportunities(scrape_batch, dry_run=dry_run)
+                log.info("Scraped and upserted final batch (%d/%d deadlines)", len(to_scrape), len(to_scrape))
+
             refresh.deadlines_scraped = new_scraped + len(existing_deadlines)
             refresh.deadlines_failed = sum(1 for d in deadlines.values() if d is None)
 
-        # Step 4: Build Opportunity models
-        opportunities = [
+        # Step 5: Remove stale opportunities
+        all_opportunities = [
             build_opportunity(source, deadlines.get(str(source.get("opid", ""))))
             for source in raw_opportunities
         ]
-
-        # Step 5 + 6: Upsert + remove stale
-        upserted, removed = upsert_opportunities(opportunities, dry_run=dry_run)
-        refresh.opportunities_added = upserted
+        _, removed = remove_stale_opportunities(all_opportunities, dry_run=dry_run)
         refresh.opportunities_removed = removed
 
-        # Step 7: Trigger index sync
+        # Step 6: Trigger index sync
         trigger_index_sync(dry_run=dry_run)
 
         refresh.status = "success"
