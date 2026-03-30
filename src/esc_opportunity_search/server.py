@@ -19,7 +19,14 @@ from esc_opportunity_search.search import (
 setup_logging("server")
 log = logging.getLogger("esc_opportunity_search")
 
-mcp = FastMCP("esc-opportunity-search")
+_transport = os.environ.get("ESC_TRANSPORT", "stdio")
+_port = int(os.environ.get("ESC_PORT", "8080"))
+
+mcp = FastMCP(
+    "esc-opportunity-search",
+    host="0.0.0.0" if _transport == "sse" else "127.0.0.1",
+    port=_port if _transport == "sse" else 8000,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -232,10 +239,9 @@ def main() -> None:
     """
     transport = os.environ.get("ESC_TRANSPORT", "stdio")
 
-    if transport == "sse":
-        port = int(os.environ.get("ESC_PORT", "8080"))
-        log.info("Starting MCP server on port %d (SSE transport)", port)
-        mcp.run(transport="sse", host="0.0.0.0", port=port)
+    if _transport == "sse":
+        log.info("Starting MCP server on port %d (SSE transport)", _port)
+        mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")
 
