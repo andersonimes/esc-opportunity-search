@@ -1,0 +1,23 @@
+# Systemd service for the ESC MCP server
+# Place in /etc/systemd/system/esc-mcp.service
+#
+# Then: systemctl daemon-reload && systemctl enable esc-mcp && systemctl start esc-mcp
+
+[Unit]
+Description=ESC Opportunity Search MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=anderson
+WorkingDirectory=/home/anderson/projects/esc-opportunity-search
+Environment=ESC_TRANSPORT=sse
+Environment=ESC_PORT=8080
+Environment=ESC_API_KEY=REPLACE_WITH_YOUR_API_KEY
+EnvironmentFile=/home/anderson/projects/esc-opportunity-search/.env
+ExecStart=/home/anderson/.local/bin/uv run python -m esc_opportunity_search.server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

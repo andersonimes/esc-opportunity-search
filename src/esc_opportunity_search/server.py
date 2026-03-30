@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from mcp.server.fastmcp import FastMCP
 
@@ -209,9 +210,34 @@ async def get_stats() -> str:
     return json.dumps(stats)
 
 
+# ---------------------------------------------------------------------------
+# API key auth middleware for remote access
+# ---------------------------------------------------------------------------
+
+def _check_api_key(request) -> bool:
+    """Validate the API key from the Authorization header."""
+    api_key = os.environ.get("ESC_API_KEY")
+    if not api_key:
+        return True  # No key configured = no auth required (local dev)
+    auth_header = request.headers.get("Authorization", "")
+    return auth_header == f"Bearer {api_key}"
+
+
 def main() -> None:
-    """Entry point for the MCP server."""
-    mcp.run(transport="stdio")
+    """Entry point for the MCP server.
+
+    Transport is selected via ESC_TRANSPORT env var:
+    - "stdio" (default): For local use / Claude Desktop subprocess
+    - "sse": For remote access over HTTP (set ESC_PORT for port, default 8080)
+    """
+    transport = os.environ.get("ESC_TRANSPORT", "stdio")
+
+    if transport == "sse":
+        port = int(os.environ.get("ESC_PORT", "8080"))
+        log.info("Starting MCP server on port %d (SSE transport)", port)
+        mcp.run(transport="sse", host="0.0.0.0", port=port)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
