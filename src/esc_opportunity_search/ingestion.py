@@ -1,8 +1,14 @@
 """ESC opportunity data ingestion pipeline.
 
 Fetches all NL-eligible volunteering opportunities from the ESC portal API,
-scrapes deadlines from individual opportunity pages, and writes the complete
-dataset to a Databricks Delta table with Vector Search index sync.
+scrapes deadlines from individual opportunity pages, and upserts the dataset
+into a Databricks Delta table with Vector Search index sync.
+
+Design principles:
+- **Incremental**: Only scrapes deadlines for opportunities that don't already
+  have a real (non-Rolling/Open) deadline stored.
+- **Idempotent**: Running twice produces the same result. Existing data is
+  preserved and updated, not replaced.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import httpx
 from esc_opportunity_search import setup_logging
 from esc_opportunity_search.models import Opportunity, RefreshLog
 from esc_opportunity_search.search import (
+    ALL_COLUMNS,
     get_index_name,
     get_table_name,
     get_vector_search_client,
@@ -60,11 +67,11 @@ REQUEST_BODY_TEMPLATE: dict = {
 
 
 # ---------------------------------------------------------------------------
-# T008: ESC API paginated fetch
+# Step 1: Fetch all opportunities from ESC API
 # ---------------------------------------------------------------------------
 
 async def fetch_all_opportunities(client: httpx.AsyncClient) -> list[dict]:
-    """Fetch all NL-eligible open opportunities from the ESC API, paginating through all results."""
+    """Fetch all NL-eligible open opportunities, paginating through all results."""
     all_hits: list[dict] = []
     offset = 0
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -83,7 +90,6 @@ async def fetch_all_opportunities(client: httpx.AsyncClient) -> list[dict]:
             source = hit.get("_source", {})
             date_end = source.get("date_end", "")
             date_start = source.get("date_start", "")
-            # Filter expired: keep if date_end >= today, or no date_end and date_start >= today
             if date_end and date_end < today:
                 continue
             if not date_end and date_start and date_start < today:
@@ -100,7 +106,38 @@ async def fetch_all_opportunities(client: httpx.AsyncClient) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# T009: Deadline scraping
+# Step 2: Load existing deadlines from Delta table
+# ---------------------------------------------------------------------------
+
+def load_existing_deadlines(dry_run: bool = False) -> dict[str, str]:
+    """Load opid -> deadline mapping for all opportunities already in the table.
+
+    Returns only real deadlines (not 'Rolling/Open'), so we know which opids
+    still need scraping.
+    """
+    if dry_run:
+        return {}
+
+    table = get_table_name()
+    ws = get_workspace_client()
+    warehouse_id = _get_warehouse_id(ws)
+
+    try:
+        result = ws.statement_execution.execute_statement(
+            warehouse_id=warehouse_id,
+            statement=f"SELECT opid, deadline FROM {table} WHERE deadline IS NOT NULL AND deadline != 'Rolling/Open'",
+            wait_timeout="50s",
+        )
+        if result.result and result.result.data_array:
+            return {row[0]: row[1] for row in result.result.data_array}
+    except Exception as exc:
+        log.warning("Could not load existing deadlines (table may not exist yet): %s", exc)
+
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Scrape deadlines (incremental — skip already-known)
 # ---------------------------------------------------------------------------
 
 async def scrape_deadline(client: httpx.AsyncClient, opid: str, max_retries: int = 3) -> str | None:
@@ -113,7 +150,7 @@ async def scrape_deadline(client: httpx.AsyncClient, opid: str, max_retries: int
         try:
             resp = await client.get(url)
             if resp.status_code == 429:
-                backoff = 2 ** (attempt + 1)  # 2, 4, 8 seconds
+                backoff = 2 ** (attempt + 1)
                 log.warning("Rate limited scraping opid %s (attempt %d/%d), backing off %ds",
                             opid, attempt + 1, max_retries + 1, backoff)
                 await asyncio.sleep(backoff)
@@ -136,31 +173,54 @@ async def scrape_deadline(client: httpx.AsyncClient, opid: str, max_retries: int
     return None
 
 
-async def scrape_deadlines(
+async def scrape_deadlines_incremental(
     client: httpx.AsyncClient,
     opportunities: list[dict],
+    existing_deadlines: dict[str, str],
 ) -> dict[str, str | None]:
-    """Scrape deadlines for opportunities that have them.
+    """Scrape deadlines only for opportunities that need it.
 
-    Uses 2-second base delay between requests with exponential backoff on 429s.
+    Skips:
+    - Opportunities with has_no_deadline=true (they're Rolling/Open by definition)
+    - Opportunities whose opid already has a real deadline in existing_deadlines
     """
     deadlines: dict[str, str | None] = {}
-    to_scrape = [o for o in opportunities if not o.get("has_no_deadline", False)]
-    log.info("Scraping deadlines for %d opportunities (skipping %d with no deadline)",
-             len(to_scrape), len(opportunities) - len(to_scrape))
+
+    # Carry forward existing real deadlines
+    for opid, deadline in existing_deadlines.items():
+        deadlines[opid] = deadline
+
+    # Determine which opids need scraping
+    to_scrape = []
+    skipped_no_deadline = 0
+    skipped_already_known = 0
+    for opp in opportunities:
+        opid = str(opp.get("opid", ""))
+        if opp.get("has_no_deadline", False):
+            skipped_no_deadline += 1
+            continue
+        if opid in existing_deadlines:
+            skipped_already_known += 1
+            continue
+        to_scrape.append(opp)
+
+    log.info(
+        "Deadline scraping: %d to scrape, %d skipped (no deadline), %d skipped (already known)",
+        len(to_scrape), skipped_no_deadline, skipped_already_known,
+    )
 
     for i, opp in enumerate(to_scrape):
         opid = str(opp["opid"])
         deadlines[opid] = await scrape_deadline(client, opid)
         if (i + 1) % 100 == 0:
             log.info("Scraped %d/%d deadlines", i + 1, len(to_scrape))
-        await asyncio.sleep(5)  # Base rate limit: 1 request per 5 seconds (ESC portal aggressive 429s)
+        await asyncio.sleep(5)  # Base rate limit: 5s between requests
 
     return deadlines
 
 
 # ---------------------------------------------------------------------------
-# T010: search_text computation + URL construction
+# Step 4: Build Opportunity models
 # ---------------------------------------------------------------------------
 
 def build_opportunity(source: dict, deadline: str | None) -> Opportunity:
@@ -212,95 +272,134 @@ def build_opportunity(source: dict, deadline: str | None) -> Opportunity:
 
 
 # ---------------------------------------------------------------------------
-# T011: Delta table full-replace write
+# Step 5: Upsert to Delta table (idempotent)
 # ---------------------------------------------------------------------------
 
-def write_to_delta_table(opportunities: list[Opportunity], dry_run: bool = False) -> None:
-    """Write the complete opportunity dataset to the Delta table (full replace)."""
-    table_name = get_table_name()
-
-    if dry_run:
-        log.info("[DRY RUN] Would write %d opportunities to %s", len(opportunities), table_name)
-        return
-
-    ws = get_workspace_client()
-
-    # Convert to list of dicts for DataFrame creation
-    rows = []
-    for opp in opportunities:
-        row = opp.model_dump(mode="json")
-        # Convert list fields to JSON strings for Delta table compatibility
-        row["topics"] = json.dumps(row["topics"])
-        row["countries"] = json.dumps(row["countries"])
-        row["volunteer_countries"] = json.dumps(row["volunteer_countries"])
-        rows.append(row)
-
-    log.info("Writing %d opportunities to Delta table %s (overwrite)", len(rows), table_name)
-
-    # Use the Databricks SDK statement execution API to write data
-    # First, create/replace the table with the data
-    if rows:
-        # Build INSERT statement with VALUES
-        columns = list(rows[0].keys())
-        col_names = ", ".join(columns)
-
-        # Use CTAS pattern: write to a temp view then overwrite the table
-        # For simplicity with the SDK, use the SQL statement execution API
-        sql_client = ws.statement_execution
-
-        # Truncate and re-insert (atomic within a transaction)
-        sql_client.execute_statement(
-            warehouse_id=_get_warehouse_id(ws),
-            statement=f"CREATE TABLE IF NOT EXISTS {table_name} ("
-                      f"opid STRING NOT NULL, title STRING, description STRING, "
-                      f"town STRING, country STRING, date_start STRING, date_end STRING, "
-                      f"has_no_deadline BOOLEAN, deadline STRING, topics STRING, "
-                      f"countries STRING, volunteer_countries STRING, "
-                      f"participant_profile STRING, url STRING, search_text STRING, "
-                      f"fetched_at STRING"
-                      f") USING DELTA",
-            wait_timeout="50s",
-        )
-
-        # Overwrite with INSERT OVERWRITE
-        values_parts = []
-        for row in rows:
-            vals = []
-            for col in columns:
-                v = row[col]
-                if v is None:
-                    vals.append("NULL")
-                elif isinstance(v, bool):
-                    vals.append("TRUE" if v else "FALSE")
-                else:
-                    escaped = str(v).replace("'", "''")
-                    vals.append(f"'{escaped}'")
-            values_parts.append(f"({', '.join(vals)})")
-
-        # Split into batches to avoid SQL statement size limits
-        batch_size = 50
-        for i in range(0, len(values_parts), batch_size):
-            batch = values_parts[i:i + batch_size]
-            mode = "INTO" if i > 0 else "OVERWRITE"
-            statement = f"INSERT {mode} {table_name} ({col_names}) VALUES {', '.join(batch)}"
-            sql_client.execute_statement(
-                warehouse_id=_get_warehouse_id(ws),
-                statement=statement,
-                wait_timeout="50s",
-            )
-            log.info("Wrote batch %d-%d of %d", i, min(i + batch_size, len(rows)), len(rows))
-
-
-def _get_warehouse_id(ws: WorkspaceClient) -> str:
+def _get_warehouse_id(ws) -> str:
     """Get the first available SQL warehouse ID."""
     warehouses = list(ws.warehouses.list())
     if not warehouses:
-        raise RuntimeError("No SQL warehouses available. Create one in the Databricks workspace.")
+        raise RuntimeError("No SQL warehouses available.")
     return warehouses[0].id
 
 
+def _sql_value(v) -> str:
+    """Convert a Python value to a SQL literal."""
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    escaped = str(v).replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _opp_to_row(opp: Opportunity) -> dict:
+    """Convert an Opportunity to a Delta-table-compatible row dict."""
+    row = opp.model_dump(mode="json")
+    row["topics"] = json.dumps(row["topics"])
+    row["countries"] = json.dumps(row["countries"])
+    row["volunteer_countries"] = json.dumps(row["volunteer_countries"])
+    # Exclude computed fields not in the table schema
+    row.pop("description_preview", None)
+    return row
+
+
+def upsert_opportunities(opportunities: list[Opportunity], dry_run: bool = False) -> tuple[int, int]:
+    """Upsert opportunities into the Delta table using MERGE.
+
+    Returns (upserted_count, removed_count).
+    """
+    table = get_table_name()
+
+    if dry_run:
+        log.info("[DRY RUN] Would upsert %d opportunities to %s", len(opportunities), table)
+        return len(opportunities), 0
+
+    ws = get_workspace_client()
+    wh_id = _get_warehouse_id(ws)
+
+    def _execute(stmt: str) -> None:
+        r = ws.statement_execution.execute_statement(
+            warehouse_id=wh_id, statement=stmt, wait_timeout="50s",
+        )
+        if r.status.error:
+            raise RuntimeError(f"SQL error: {r.status.error.message}")
+
+    # Ensure table exists
+    _execute(
+        f"CREATE TABLE IF NOT EXISTS {table} ("
+        f"opid STRING NOT NULL, title STRING, description STRING, "
+        f"town STRING, country STRING, date_start STRING, date_end STRING, "
+        f"has_no_deadline BOOLEAN, deadline STRING, topics STRING, "
+        f"countries STRING, volunteer_countries STRING, "
+        f"participant_profile STRING, url STRING, search_text STRING, "
+        f"fetched_at STRING"
+        f") USING DELTA"
+    )
+
+    # Upsert in batches using a temp view + MERGE
+    batch_size = 50
+    upserted = 0
+    for i in range(0, len(opportunities), batch_size):
+        batch = opportunities[i:i + batch_size]
+        rows = [_opp_to_row(opp) for opp in batch]
+        columns = [c for c in ALL_COLUMNS]
+
+        # Build VALUES clause
+        values_parts = []
+        for row in rows:
+            vals = [_sql_value(row.get(col)) for col in columns]
+            values_parts.append(f"({', '.join(vals)})")
+
+        col_names = ", ".join(columns)
+        col_defs = ", ".join(f"{c} STRING" for c in columns)
+
+        # MERGE: update if exists, insert if not
+        update_set = ", ".join(
+            f"target.{c} = source.{c}" for c in columns if c != "opid"
+        )
+        insert_cols = ", ".join(columns)
+        insert_vals = ", ".join(f"source.{c}" for c in columns)
+
+        merge_sql = f"""
+            MERGE INTO {table} AS target
+            USING (
+                SELECT * FROM VALUES {', '.join(values_parts)}
+                AS t({col_names})
+            ) AS source
+            ON target.opid = source.opid
+            WHEN MATCHED THEN UPDATE SET {update_set}
+            WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
+        """
+        _execute(merge_sql)
+        upserted += len(batch)
+        log.info("Upserted batch %d-%d of %d", i + 1, min(i + batch_size, len(opportunities)), len(opportunities))
+
+    # Remove stale opportunities (no longer in API response)
+    api_opids = {opp.opid for opp in opportunities}
+    if api_opids:
+        opid_list = ", ".join(f"'{opid}'" for opid in api_opids)
+        # Count stale before deleting
+        count_r = ws.statement_execution.execute_statement(
+            warehouse_id=wh_id,
+            statement=f"SELECT COUNT(*) FROM {table} WHERE opid NOT IN ({opid_list})",
+            wait_timeout="50s",
+        )
+        removed = 0
+        if count_r.result and count_r.result.data_array:
+            removed = int(count_r.result.data_array[0][0])
+
+        if removed > 0:
+            _execute(f"DELETE FROM {table} WHERE opid NOT IN ({opid_list})")
+            log.info("Removed %d stale opportunities", removed)
+
+        return upserted, removed
+
+    return upserted, 0
+
+
 # ---------------------------------------------------------------------------
-# T012: Vector Search index sync
+# Step 6: Vector Search index sync
 # ---------------------------------------------------------------------------
 
 def trigger_index_sync(dry_run: bool = False) -> None:
@@ -318,20 +417,18 @@ def trigger_index_sync(dry_run: bool = False) -> None:
         index.sync()
         log.info("Triggered Vector Search index sync for %s", index_name)
     except Exception as exc:
-        log.error("Failed to trigger index sync: %s", exc)
-        raise
+        # Non-fatal: data is in Delta table even if sync fails
+        log.warning("Failed to trigger index sync (sync manually from Databricks UI): %s", exc)
 
 
-def _get_vs_endpoint_name(vsc: VectorSearchClient) -> str:
-    """Get the first available Vector Search endpoint name."""
-    endpoints = vsc.list_endpoints().get("endpoints", [])
-    if not endpoints:
-        raise RuntimeError("No Vector Search endpoints available.")
-    return endpoints[0]["name"]
+def _get_vs_endpoint_name(vsc) -> str:
+    """Get the Vector Search endpoint name."""
+    import os
+    return os.environ.get("DATABRICKS_VS_ENDPOINT", "esc-search-endpoint")
 
 
 # ---------------------------------------------------------------------------
-# T013: RefreshLog tracking
+# Step 7: RefreshLog tracking
 # ---------------------------------------------------------------------------
 
 def log_refresh(refresh_log: RefreshLog) -> None:
@@ -346,48 +443,67 @@ def log_refresh(refresh_log: RefreshLog) -> None:
         refresh_log.deadlines_scraped,
         refresh_log.deadlines_failed,
     )
-    # Also write structured JSON line to the log
     log.info("REFRESH_LOG: %s", refresh_log.to_log_line())
 
 
 # ---------------------------------------------------------------------------
-# T014: Main entry point
+# Main pipeline (incremental + idempotent)
 # ---------------------------------------------------------------------------
 
 async def run_ingestion(dry_run: bool = False) -> RefreshLog:
-    """Run the full ingestion pipeline."""
+    """Run the incremental ingestion pipeline.
+
+    1. Fetch all opportunities from ESC API (always full fetch — it's fast)
+    2. Load existing deadlines from Delta table (skip re-scraping known ones)
+    3. Scrape deadlines only for new/unknown opportunities
+    4. Build Opportunity models
+    5. Upsert to Delta table (MERGE — idempotent)
+    6. Remove stale opportunities no longer in API
+    7. Trigger Vector Search index sync
+    """
     refresh = RefreshLog(
         run_id=str(uuid.uuid4()),
         started_at=datetime.now(timezone.utc),
     )
 
     try:
+        # Step 1: Fetch from API
         async with httpx.AsyncClient(
             headers={"User-Agent": BROWSER_UA, "Content-Type": "application/json"},
             timeout=60.0,
         ) as client:
-            # Fetch all opportunities
             raw_opportunities = await fetch_all_opportunities(client)
             refresh.opportunities_fetched = len(raw_opportunities)
             refresh.pages_fetched = (len(raw_opportunities) // PAGE_SIZE) + 1
             log.info("Fetched %d opportunities total", len(raw_opportunities))
 
-            # Scrape deadlines
-            deadlines = await scrape_deadlines(client, raw_opportunities)
-            refresh.deadlines_scraped = sum(1 for d in deadlines.values() if d is not None)
+            # Step 2: Load existing deadlines
+            existing_deadlines = load_existing_deadlines(dry_run=dry_run)
+            log.info("Loaded %d existing deadlines from Delta table", len(existing_deadlines))
+
+            # Step 3: Scrape deadlines (incremental)
+            deadlines = await scrape_deadlines_incremental(
+                client, raw_opportunities, existing_deadlines,
+            )
+            new_scraped = sum(
+                1 for opid, d in deadlines.items()
+                if d is not None and opid not in existing_deadlines
+            )
+            refresh.deadlines_scraped = new_scraped + len(existing_deadlines)
             refresh.deadlines_failed = sum(1 for d in deadlines.values() if d is None)
 
-        # Build Opportunity models
+        # Step 4: Build Opportunity models
         opportunities = [
             build_opportunity(source, deadlines.get(str(source.get("opid", ""))))
             for source in raw_opportunities
         ]
 
-        # Write to Delta table
-        write_to_delta_table(opportunities, dry_run=dry_run)
-        refresh.opportunities_added = len(opportunities)
+        # Step 5 + 6: Upsert + remove stale
+        upserted, removed = upsert_opportunities(opportunities, dry_run=dry_run)
+        refresh.opportunities_added = upserted
+        refresh.opportunities_removed = removed
 
-        # Trigger index sync
+        # Step 7: Trigger index sync
         trigger_index_sync(dry_run=dry_run)
 
         refresh.status = "success"
@@ -406,7 +522,8 @@ async def run_ingestion(dry_run: bool = False) -> RefreshLog:
 def main() -> None:
     """CLI entry point for the ingestion pipeline."""
     parser = argparse.ArgumentParser(description="ESC Opportunity Search - Data Ingestion")
-    parser.add_argument("--dry-run", action="store_true", help="Fetch and process data without writing to Databricks")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Fetch and process data without writing to Databricks")
     args = parser.parse_args()
 
     setup_logging("ingestion")
