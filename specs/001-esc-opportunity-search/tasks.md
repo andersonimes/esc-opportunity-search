@@ -149,7 +149,7 @@
 
 ---
 
-- [ ] T033 End-to-end validation: run ingestion against live ESC API, then invoke all 4 MCP tools via `mcp dev` inspector and verify responses match contracts
+- [x] T033 End-to-end validation: run ingestion against live ESC API, then invoke all 4 MCP tools via `mcp dev` inspector and verify responses match contracts
 - [ ] T034 Configure daily ingestion cron job on Proxmox: add crontab entry running `uv run python -m esc_opportunity_search.ingestion` at 06:00 UTC, logging to the configured log file. Verify first scheduled run completes successfully.
 
 ---

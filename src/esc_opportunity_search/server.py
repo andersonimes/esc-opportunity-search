@@ -21,11 +21,12 @@ log = logging.getLogger("esc_opportunity_search")
 
 _transport = os.environ.get("ESC_TRANSPORT", "stdio")
 _port = int(os.environ.get("ESC_PORT", "8080"))
+_is_remote = _transport in ("sse", "streamable-http")
 
 mcp = FastMCP(
     "esc-opportunity-search",
-    host="0.0.0.0" if _transport == "sse" else "127.0.0.1",
-    port=_port if _transport == "sse" else 8000,
+    host="0.0.0.0" if _is_remote else "127.0.0.1",
+    port=_port if _is_remote else 8000,
 )
 
 
@@ -239,9 +240,9 @@ def main() -> None:
     """
     transport = os.environ.get("ESC_TRANSPORT", "stdio")
 
-    if _transport == "sse":
-        log.info("Starting MCP server on port %d (SSE transport)", _port)
-        mcp.run(transport="sse")
+    if _transport in ("sse", "streamable-http"):
+        log.info("Starting MCP server on port %d (%s transport)", _port, _transport)
+        mcp.run(transport=_transport)
     else:
         mcp.run(transport="stdio")
 
