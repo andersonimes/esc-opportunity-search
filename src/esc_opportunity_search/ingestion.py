@@ -422,28 +422,36 @@ def remove_stale_opportunities(current_opportunities: list[Opportunity], dry_run
 # ---------------------------------------------------------------------------
 
 def trigger_index_sync(dry_run: bool = False) -> None:
-    """Trigger a sync of the Vector Search index after a successful Delta table write."""
+    """Trigger a sync of the Vector Search index via REST API.
+
+    Uses the REST API directly instead of the Python SDK, which has
+    scope issues with scoped PATs.
+    """
     if dry_run:
         log.info("[DRY RUN] Would trigger Vector Search index sync")
         return
 
+    import os
+    import httpx as httpx_sync
+
+    host = os.environ.get("DATABRICKS_HOST", "")
+    token = os.environ.get("DATABRICKS_TOKEN", "")
     index_name = get_index_name()
-    vsc = get_vector_search_client()
 
     try:
-        endpoint_name = _get_vs_endpoint_name(vsc)
-        index = vsc.get_index(endpoint_name=endpoint_name, index_name=index_name)
-        index.sync()
-        log.info("Triggered Vector Search index sync for %s", index_name)
+        resp = httpx_sync.post(
+            f"{host}/api/2.0/vector-search/indexes/{index_name}/sync",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30.0,
+        )
+        if resp.status_code == 200:
+            log.info("Triggered Vector Search index sync for %s", index_name)
+        elif "not ready to sync" in resp.text:
+            log.info("Index sync already in progress for %s", index_name)
+        else:
+            log.warning("Index sync returned %d: %s", resp.status_code, resp.text[:200])
     except Exception as exc:
-        # Non-fatal: data is in Delta table even if sync fails
-        log.warning("Failed to trigger index sync (sync manually from Databricks UI): %s", exc)
-
-
-def _get_vs_endpoint_name(vsc) -> str:
-    """Get the Vector Search endpoint name."""
-    import os
-    return os.environ.get("DATABRICKS_VS_ENDPOINT", "esc-search-endpoint")
+        log.warning("Failed to trigger index sync: %s", exc)
 
 
 # ---------------------------------------------------------------------------
