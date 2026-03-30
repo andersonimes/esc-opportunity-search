@@ -13,7 +13,8 @@
 - Q: What opportunity data should drive semantic search matching? → A: All text fields — title, description, topics, location, and participant profile — concatenated for maximum recall.
 - Q: How should ingestion failures be surfaced? → A: Log to file only. Anderson checks manually or sets up external log monitoring.
 - Q: How should opportunities with no deadline or failed deadline scraping be handled? → A: Display as "Rolling/Open". Never exclude from search/filter results. Only exclude from deadline-sorted lists like "closing soon". (FR-010a added)
-- Q: How should the scraper handle ESC portal rate limiting? → A: 2-second base delay between requests, exponential backoff on 429s (2s/4s/8s, 3 retries). Failed scrapes get "Rolling/Open" deadline. (FR-010 updated)
+- Q: How should the scraper handle ESC portal rate limiting? → A: 5-second base delay between requests, exponential backoff on 429s (2s/4s/8s, 3 retries). Failed scrapes get "Rolling/Open" deadline. (FR-010 updated)
+- Q: Should ingestion be incremental or full-replace? → A: Incremental. Previously scraped deadlines are preserved across runs. Only new/unknown opportunities get scraped. Data is upserted (MERGE), not replaced. (FR-008a, FR-011a added)
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -100,6 +101,9 @@ The system automatically refreshes its opportunity data daily, fetching all curr
 3. **Given** an opportunity is removed from the ESC portal, **When** the next daily refresh runs, **Then** the opportunity is no longer returned in search results.
 4. **Given** the source is temporarily unavailable during a refresh, **When** the refresh fails, **Then** the existing data is preserved (not deleted) and the failure is logged.
 5. **Given** the source returns paginated results (500 per page), **When** a refresh runs, **Then** all pages are fetched to capture the complete dataset.
+6. **Given** a previous refresh successfully scraped deadlines for some opportunities, **When** the next refresh runs, **Then** those deadlines are preserved and only new/unknown opportunities are scraped.
+7. **Given** a refresh starts, **When** the API fetch completes (before deadline scraping), **Then** all opportunities are immediately queryable with "Rolling/Open" deadlines, and real deadlines are enriched progressively as scraping continues.
+8. **Given** a refresh is run twice with no changes in the source data, **When** the second run completes, **Then** the data in the system is identical to after the first run (idempotent).
 
 ---
 
@@ -131,6 +135,7 @@ The system automatically refreshes its opportunity data daily, fetching all curr
 
 - **FR-007**: System MUST fetch all open ESC volunteering opportunities eligible for Netherlands residents from the source, with no truncation of descriptions.
 - **FR-008**: System MUST refresh opportunity data at least once every 24 hours via an automated process.
+- **FR-008a**: Ingestion MUST be incremental and idempotent. Previously scraped deadlines MUST be preserved across runs — only opportunities without a known deadline are scraped. Running the same ingestion twice MUST produce the same result. All opportunities MUST be queryable immediately upon ingestion start (with "Rolling/Open" deadlines), with real deadlines enriched progressively as scraping completes.
 - **FR-009**: System MUST handle paginated source data, fetching all available pages to capture the complete dataset.
 - **FR-010**: System MUST extract application deadlines from individual opportunity pages where available. Scraping MUST use a minimum 5-second delay between requests and retry up to 3 times on rate-limit responses (HTTP 429) with exponential backoff (2s, 4s, 8s).
 - **FR-010a**: Opportunities with no deadline (rolling admission) or where deadline extraction failed MUST be displayed with deadline shown as "Rolling/Open". These opportunities MUST NOT be excluded from search results, filter results, or statistics. They are only excluded from deadline-specific sorted lists (e.g., "closing soon").
