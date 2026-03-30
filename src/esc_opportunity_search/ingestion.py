@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -106,17 +107,46 @@ async def fetch_all_opportunities(client: httpx.AsyncClient) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Load existing deadlines from Delta table
+# Step 2: Load existing deadlines from Delta table + local cache
 # ---------------------------------------------------------------------------
 
-def load_existing_deadlines(dry_run: bool = False) -> dict[str, str]:
-    """Load opid -> deadline mapping for all opportunities already in the table.
+DEADLINE_CACHE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "deadline_cache.json"
+)
 
-    Returns only real deadlines (not 'Rolling/Open'), so we know which opids
-    still need scraping.
-    """
-    if dry_run:
+
+def _load_deadline_cache() -> dict[str, str]:
+    """Load the local deadline cache file (survives process kills)."""
+    try:
+        with open(DEADLINE_CACHE_FILE) as f:
+            data = json.load(f)
+            return {k: v for k, v in data.items() if v and v != "Rolling/Open"}
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}
+
+
+def _save_deadline_cache(deadlines: dict[str, str | None]) -> None:
+    """Save scraped deadlines to local cache (only real deadlines, not Rolling/Open)."""
+    real = {k: v for k, v in deadlines.items() if v and v != "Rolling/Open"}
+    # Merge with existing cache (don't lose prior entries)
+    existing = _load_deadline_cache()
+    existing.update(real)
+    with open(DEADLINE_CACHE_FILE, "w") as f:
+        json.dump(existing, f)
+
+
+def load_existing_deadlines(dry_run: bool = False) -> dict[str, str]:
+    """Load opid -> deadline mapping from Delta table + local cache.
+
+    Merges both sources. Returns only real deadlines (not 'Rolling/Open'),
+    so we know which opids still need scraping.
+    """
+    # Always load local cache (even in dry-run)
+    deadlines = _load_deadline_cache()
+    log.info("Loaded %d deadlines from local cache", len(deadlines))
+
+    if dry_run:
+        return deadlines
 
     table = get_table_name()
     ws = get_workspace_client()
@@ -129,11 +159,13 @@ def load_existing_deadlines(dry_run: bool = False) -> dict[str, str]:
             wait_timeout="50s",
         )
         if result.result and result.result.data_array:
-            return {row[0]: row[1] for row in result.result.data_array}
+            db_deadlines = {row[0]: row[1] for row in result.result.data_array}
+            log.info("Loaded %d deadlines from Delta table", len(db_deadlines))
+            deadlines.update(db_deadlines)
     except Exception as exc:
         log.warning("Could not load existing deadlines (table may not exist yet): %s", exc)
 
-    return {}
+    return deadlines
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +582,8 @@ async def run_ingestion(dry_run: bool = False) -> RefreshLog:
 
                 if deadline is not None:
                     new_scraped += 1
+                    # Save to local cache immediately (survives kills/crashes)
+                    _save_deadline_cache(deadlines)
 
                 # Re-build opportunity with the scraped deadline and queue for upsert
                 scrape_batch.append(build_opportunity(opp, deadline))

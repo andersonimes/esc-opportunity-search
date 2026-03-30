@@ -9,6 +9,10 @@ dist/
 .env
 .env.*
 
+# Ingestion cache
+deadline_cache.json
+esc-ingestion.log
+
 # IDE
 .vscode/
 .idea/
