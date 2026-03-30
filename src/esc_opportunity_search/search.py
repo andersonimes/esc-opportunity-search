@@ -150,8 +150,9 @@ def semantic_search(
         filters=filters if filters else None,
     )
 
+    # VS SDK response: {"manifest": {"columns": [...]}, "result": {"data_array": [...], "row_count": N}}
     rows = result.get("result", {}).get("data_array", [])
-    column_names = [c["name"] for c in result.get("result", {}).get("manifest", {}).get("columns", [])]
+    column_names = [c["name"] for c in result.get("manifest", {}).get("columns", [])]
 
     opportunities: list[tuple[Opportunity, float]] = []
     for row in rows:
