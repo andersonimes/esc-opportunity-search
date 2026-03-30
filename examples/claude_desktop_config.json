@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "esc-opportunity-search": {
+      "command": "uv",
+      "args": [
+        "--directory", "/path/to/esc-opportunity-search",
+        "run", "python", "-m", "esc_opportunity_search.server"
+      ],
+      "env": {
+        "DATABRICKS_HOST": "https://your-workspace.cloud.databricks.com",
+        "DATABRICKS_TOKEN": "dapi...",
+        "DATABRICKS_CATALOG": "main",
+        "DATABRICKS_SCHEMA": "esc"
+      }
+    }
+  }
+}

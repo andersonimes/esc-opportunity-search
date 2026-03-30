@@ -1,0 +1,168 @@
+{
+    "took": 12,
+    "timed_out": false,
+    "hits": {
+        "total": {
+            "value": 1792,
+            "relation": "eq"
+        },
+        "max_score": null,
+        "hits": [
+            {
+                "_index": "esc_opportunity",
+                "_id": "50846",
+                "_score": 5,
+                "_source": {
+                    "country": "IT",
+                    "participant_profile": "Check also your SPAM for email from us! :) Ready to work with teenagers, young people. Has a great love to socialization, communication, can easily bond with young people and give them support. Ready to play sports and do workouts, in any weather conditions; willing to do arts and play games; willing to collaborate and work in a team. Patient and creative; communicative and open-minded; positive and proactive; adaptable; able to cooperate with educators; willing to plan, organise and manage activities. Motivated to learn and speak Italian and to communicate with locals. We expect your CV and Motivation to be in ENGLISH!",
+                    "date_start": "2026-04-13T12:00:00",
+                    "town": "Milano",
+                    "topics": [
+                        "discr",
+                        "socl",
+                        "migr",
+                        "edu",
+                        "cult",
+                        "sprt"
+                    ],
+                    "opid": 50846,
+                    "description": "Centro Irda is a vibrant youth center for children and teenagers, where they can join after-school activities, connect with friends, and get the support they need.\r\nVolunteer activities include:\r\n-Helping kids and teens with their homework so they can stay on track at school \u270f\ufe0f\ud83d\udcda\r\n-Assisting with workshops on music, radio, sports, art, and more \ud83c\udfb6\ud83c\udfa8\u26bd\r\n-Supporting educators in organizing sports activities \ud83e\udd1d\r\n-Coming up with new ideas to engage the local community \ud83d\udca1\ud83c\udf1f\r\n-Sharing your volunteer experience and promoting European opportunities among young people \ud83c\udf0d\u2728\r\n-Assisting with social media and writing blog posts \ud83d\udcf1\u270d\ufe0f\r\n-Showcasing the center\u2019s activities by taking photos",
+                    "has_no_deadline": false,
+                    "volunteer_countries": [
+                        "AT",
+                        "BE",
+                        "BG",
+                        "HR",
+                        "CY",
+                        "CZ",
+                        "DK",
+                        "EE",
+                        "FI",
+                        "FR",
+                        "DE",
+                        "EL",
+                        "GL",
+                        "HU",
+                        "IS",
+                        "IE",
+                        "LV",
+                        "LI",
+                        "LT",
+                        "LU",
+                        "MT",
+                        "NL",
+                        "NO",
+                        "PL",
+                        "PT",
+                        "RO",
+                        "SK",
+                        "SI",
+                        "ES",
+                        "SE"
+                    ],
+                    "date_end": "2026-12-31T12:00:00",
+                    "title": "Volunteer in Milan in the youth center IRDA"
+                },
+                "sort": [
+                    1774881314000,
+                    5
+                ]
+            },
+            {
+                "_index": "esc_opportunity",
+                "_id": "50845",
+                "_score": 5,
+                "_source": {
+                    "country": "IT",
+                    "participant_profile": "LAST CALL (We're looking for males, preferably to balance out the group). MUST be resident /citizen of an EU country. Available for the whole period of the project (18/04/25 - 18/05/25). aged 18 to 30; interested in living in the nature and in an isolated area; ready for activities with donkeys; open for physical or manual work and \u201cget\r\nhands dirty\u201d; ready for trekking experiences; ready to cook for the others; proactive and respectful; ready to go out from comfort zone, experiment, and explore; at least intermediate knowledge of English; ready to share private spaces with the team; be open minded; positive and peaceful attitude; flexibility to adapt to possible changes;",
+                    "date_start": "2026-04-18T12:00:00",
+                    "town": "CASALINO DI LIGONCHIO",
+                    "topics": [
+                        "natr",
+                        "health",
+                        "cult"
+                    ],
+                    "opid": 50845,
+                    "description": "Ostello dei Balocchi is located in Casalino di Ligonchio at 1000 meters altitude in the Tuscan-Emilian Apennine National Park, a UNESCO MAB area, in the province of Reggio Emilia. Managed by Legambiente Ligonchio, it serves as an Environmental Education Center offering donkey tourism, artistic workshops, and nature-immersed stays. The ESC Team at Ostello dei Balocchi runs a one-month intensive volunteering program, with activities 4 days a week for up to 36 hours. Volunteers handle hostel and Ravinart park maintenance, donkey care (including trekking and outdoor sessions), trail cleaning, educational activities and intercultural meetings with seniors. All takes place in an immersive natural setting, promoting environmental sustainability and social cohesion through the European Solidarity Corps Volunteering Teams in High Priority Areas program. ",
+                    "has_no_deadline": false,
+                    "volunteer_countries": [
+                        "CZ",
+                        "BG",
+                        "DE",
+                        "ES",
+                        "RO",
+                        "HU",
+                        "PL",
+                        "SI",
+                        "FI",
+                        "LV",
+                        "NL",
+                        "SK"
+                    ],
+                    "date_end": "2026-05-19T12:00:00",
+                    "title": "Esc Team in Balocchi Hostel: caring for donkeys and maintaining forest"
+                },
+                "sort": [
+                    1774881017000,
+                    5
+                ]
+            },
+            {
+                "_index": "esc_opportunity",
+                "_id": "50839",
+                "_score": 5,
+                "_source": {
+                    "country": "PL",
+                    "participant_profile": "- Friendly, making relationships with people easily, open - Patient, willing to work with children - Communicative English - Creative, likes to take initiative - Reliable and diligent",
+                    "date_start": "2026-09-01T12:00:00",
+                    "town": "Pu\u0142tusk",
+                    "topics": [
+                        "edu",
+                        "cult"
+                    ],
+                    "opid": 50839,
+                    "description": "Przedszkole Miejskie no. 5 is one of three municipal kindergartens in Pu\u0142tusk. It provides everyday care and education to children aged 3\u20136. The main activities are: didactic and outdoor activities, free play, excursions, events, art activities, meals and self-service activities. The main idea behind volunteering in the kindergartens is to implement an intercultural aspect into the education program. The volunteers assist teachers, but besides that, there is a lot of space for personal initiative, such as organizing workshops, presentations and classes, which introduce their culture and language to the group. The volunteers teach foreign languages (mostly English) in an informal way through games, exercises, etc.",
+                    "has_no_deadline": true,
+                    "volunteer_countries": [
+                        "TR",
+                        "AT",
+                        "BE",
+                        "BG",
+                        "CY",
+                        "CZ",
+                        "DE",
+                        "DK",
+                        "EE",
+                        "EL",
+                        "ES",
+                        "FI",
+                        "HR",
+                        "HU",
+                        "IE",
+                        "IS",
+                        "IT",
+                        "LI",
+                        "LT",
+                        "LU",
+                        "LV",
+                        "MT",
+                        "NL",
+                        "MK",
+                        "NO",
+                        "PT",
+                        "RO",
+                        "SE",
+                        "SK",
+                        "SI"
+                    ],
+                    "date_end": "2027-07-22T12:00:00",
+                    "title": "Volunteering in kindergarten in Pu\u0142tusk"
+                },
+                "sort": [
+                    1774874236000,
+                    5
+                ]
+            }
+        ]
+    }
+}

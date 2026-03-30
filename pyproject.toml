@@ -1,0 +1,31 @@
+[project]
+name = "esc-opportunity-search"
+version = "0.1.0"
+description = "MCP server for searching European Solidarity Corps volunteering opportunities"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.2.0",          # MCP server SDK (Anthropic)
+    "databricks-vectorsearch>=0.40", # Databricks Vector Search client
+    "databricks-sdk>=0.36.0",   # Delta table operations
+    "httpx>=0.27.0",            # Async HTTP for ESC API + scraping
+]
+
+[project.scripts]
+esc-opportunity-search = "esc_opportunity_search.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/esc_opportunity_search"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
